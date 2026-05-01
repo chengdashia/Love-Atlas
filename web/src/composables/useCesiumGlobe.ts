@@ -9,6 +9,11 @@ export function useCesiumGlobe(containerRef: Ref<HTMLElement | null>, options?: 
   const viewer = shallowRef<any>(null)
   const isReady = ref(false)
   const CesiumRef = shallowRef<any>(null)
+  const initialView = {
+    lng: 105,
+    lat: 20,
+    height: 20000000,
+  }
 
   async function init() {
     if (!containerRef.value) return
@@ -23,6 +28,11 @@ export function useCesiumGlobe(containerRef: Ref<HTMLElement | null>, options?: 
     const creditContainer = document.createElement('div')
     creditContainer.style.display = 'none'
     const v = new Cesium.Viewer(containerRef.value, {
+      contextOptions: {
+        webgl: {
+          alpha: !!options?.lowPerformance,
+        },
+      },
       baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
         url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         maximumLevel: 18,
@@ -52,14 +62,19 @@ export function useCesiumGlobe(containerRef: Ref<HTMLElement | null>, options?: 
     }))
 
     // Configure globe appearance
+    v.scene.backgroundColor = options?.lowPerformance ? Cesium.Color.TRANSPARENT : Cesium.Color.BLACK
     v.scene.globe.enableLighting = !options?.lowPerformance
     v.scene.fog.enabled = !options?.lowPerformance
-    v.scene.skyAtmosphere.show = !options?.lowPerformance
-    v.scene.skyBox.show = !options?.lowPerformance
+    if (v.scene.skyAtmosphere) {
+      v.scene.skyAtmosphere.show = !options?.lowPerformance
+    }
+    if (v.scene.skyBox && 'show' in v.scene.skyBox) {
+      ;(v.scene.skyBox as { show: boolean }).show = !options?.lowPerformance
+    }
 
     // Set initial camera position - show full globe centered on Asia
     v.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(105, 20, 20000000),
+      destination: Cesium.Cartesian3.fromDegrees(initialView.lng, initialView.lat, initialView.height),
       orientation: {
         heading: 0,
         pitch: -Math.PI / 2,
@@ -89,6 +104,32 @@ export function useCesiumGlobe(containerRef: Ref<HTMLElement | null>, options?: 
     })
   }
 
+  function zoomIn() {
+    if (!viewer.value) return
+    const camera = viewer.value.camera
+    camera.zoomIn(Math.max(camera.positionCartographic.height * 0.35, 50000))
+  }
+
+  function zoomOut() {
+    if (!viewer.value) return
+    const camera = viewer.value.camera
+    camera.zoomOut(Math.max(camera.positionCartographic.height * 0.35, 50000))
+  }
+
+  function resetView() {
+    if (!viewer.value || !CesiumRef.value) return
+    const Cesium = CesiumRef.value
+    viewer.value.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(initialView.lng, initialView.lat, initialView.height),
+      orientation: {
+        heading: 0,
+        pitch: -Math.PI / 2,
+        roll: 0,
+      },
+      duration: 0.9,
+    })
+  }
+
   function fitCities(cities: Array<{ latitude: number; longitude: number }>) {
     if (!viewer.value || !CesiumRef.value || cities.length === 0) return
     const Cesium = CesiumRef.value
@@ -112,5 +153,5 @@ export function useCesiumGlobe(containerRef: Ref<HTMLElement | null>, options?: 
   onMounted(() => init())
   onUnmounted(() => destroy())
 
-  return { viewer, isReady, Cesium: CesiumRef, flyToCity, fitCities }
+  return { viewer, isReady, Cesium: CesiumRef, flyToCity, fitCities, zoomIn, zoomOut, resetView }
 }

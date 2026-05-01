@@ -37,3 +37,5 @@ export const mockVisitStats: VisitStats = {
   },
   shareLinkClicks: 89,
 }
+
+export const mockStats = mockVisitStats

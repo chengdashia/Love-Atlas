@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useCityStore } from '@/stores/city'
 import { useMemoryStore } from '@/stores/memory'
@@ -16,6 +16,8 @@ const anniversaryStore = useAnniversaryStore()
 const cesiumContainer = ref<HTMLElement | null>(null)
 const showOverlay = ref(false)
 const selectedCityName = ref('')
+const isSidebarCollapsed = ref(false)
+const isAutoRotating = ref(true)
 const cityScreenPositions = ref<Array<{ city: City; x: number; y: number }>>([])
 
 // Sidebar nav
@@ -59,7 +61,34 @@ const videoCount = computed(() => {
 })
 
 // Globe
-const { viewer, isReady, Cesium, flyToCity } = useCesiumGlobe(cesiumContainer)
+const { viewer, isReady, Cesium, flyToCity, zoomIn, zoomOut, resetView } = useCesiumGlobe(cesiumContainer, { lowPerformance: false })
+
+// Cesium may init before container has real dimensions (CSS layout timing).
+// Force resize once layout is complete.
+watch(isReady, (ready) => {
+  if (!ready || !viewer.value) return
+  const v = viewer.value
+  // Multiple attempts at different delays to catch layout completion
+  const delays = [0, 100, 300, 600, 1000]
+  delays.forEach(d => {
+    setTimeout(() => {
+      if (v && !v.isDestroyed()) {
+        v.resize()
+        v.scene.requestRender()
+      }
+    }, d)
+  })
+  // Also observe container for ongoing size changes
+  if (cesiumContainer.value) {
+    const ro = new ResizeObserver(() => {
+      if (v && !v.isDestroyed()) {
+        v.resize()
+      }
+    })
+    ro.observe(cesiumContainer.value)
+    onUnmounted(() => ro.disconnect())
+  }
+})
 
 function updateCityPositions() {
   if (!viewer.value || !Cesium.value) return
@@ -92,6 +121,7 @@ function updateCityPositions() {
 }
 
 let removePostRender: (() => void) | null = null
+let removeAutoRotate: (() => void) | null = null
 watch(isReady, (ready) => {
   if (ready && viewer.value) {
     updateCityPositions()
@@ -101,6 +131,19 @@ watch(isReady, (ready) => {
     removePostRender = () => handler()
   }
 })
+
+watch([isReady, isAutoRotating], ([ready, rotating]) => {
+  removeAutoRotate?.()
+  removeAutoRotate = null
+  if (!ready || !rotating || !viewer.value || !Cesium.value) return
+  const v = viewer.value
+  const C = Cesium.value
+  removeAutoRotate = v.clock.onTick.addEventListener(() => {
+    if (v.isDestroyed()) return
+    v.camera.rotate(C.Cartesian3.UNIT_Z, -0.00028)
+    v.scene.requestRender()
+  })
+}, { immediate: true })
 
 onMounted(async () => {
   await Promise.all([
@@ -113,6 +156,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   removePostRender?.()
+  removeAutoRotate?.()
 })
 
 function handleCityClick(city: City) {
@@ -128,15 +172,32 @@ function navigateTo(key: string) {
   if (item?.route) router.push(item.route)
 }
 
+function toggleSidebar() {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value
+  nextTick(() => {
+    viewer.value?.resize()
+    viewer.value?.scene.requestRender()
+  })
+}
+
+function handleResetView() {
+  selectedCityName.value = ''
+  resetView()
+}
+
 const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
 </script>
 
 <template>
-  <div class="theme-dark flex h-screen overflow-hidden">
+  <div
+    class="home-shell flex h-screen overflow-hidden"
+    :class="{ 'is-sidebar-collapsed': isSidebarCollapsed }"
+    style="background-color: #070811; color: #fff; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-image: radial-gradient(circle at 50% 50%, rgba(30, 32, 60, 0.4) 0%, transparent 60%), radial-gradient(circle at 80% 20%, rgba(157, 78, 221, 0.08) 0%, transparent 40%);"
+  >
     <!-- ====== 左侧导航栏 ====== -->
-    <aside class="w-[240px] flex-shrink-0 bg-[#0c0d16]/90 border-r border-white/5 flex flex-col pt-8 pb-4 px-4 z-20 backdrop-blur-xl">
+    <aside class="home-sidebar w-[240px] flex-shrink-0 bg-[#0c0d16]/90 border-r border-white/5 flex flex-col pt-8 pb-4 px-4 z-20 backdrop-blur-xl">
       <!-- Logo -->
-      <div class="flex items-center gap-3 px-2 mb-10">
+      <div class="home-logo flex items-center gap-3 px-2 mb-10">
         <div class="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 via-purple-600 to-pink-500 flex items-center justify-center glow-purple">
           <i class="ph-fill ph-heart text-white text-xl"></i>
         </div>
@@ -147,27 +208,27 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
       </div>
 
       <!-- 导航菜单 -->
-      <nav class="flex-1 space-y-1.5">
+      <nav class="home-nav flex-1 space-y-1.5">
         <a
           v-for="item in navItems"
           :key="item.key"
           href="#"
           :class="[
-            'flex items-center gap-3 px-4 py-3 rounded-xl transition',
+            'home-nav-link flex items-center gap-3 px-4 py-3 rounded-xl transition',
             activeNav === item.key
               ? 'nav-active text-white'
               : 'text-gray-400 hover:text-white hover:bg-white/5'
           ]"
           @click.prevent="navigateTo(item.key)"
         >
-          <i :class="['ph', item.icon, 'text-lg', activeNav === item.key ? 'text-purple-400' : '']"></i>
-          <span class="text-[13px]" :class="activeNav === item.key ? 'font-medium' : ''">{{ item.label }}</span>
+          <i :class="['home-nav-icon ph', item.icon, 'text-lg', activeNav === item.key ? 'text-purple-400' : '']"></i>
+          <span class="home-nav-label text-[13px]" :class="activeNav === item.key ? 'font-medium' : ''">{{ item.label }}</span>
         </a>
 
-        <div class="pt-4 mt-2 border-t border-white/5">
-          <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-xl text-gray-400 hover:text-white hover:bg-white/5 transition">
-            <i class="ph ph-gear text-lg"></i>
-            <span class="text-[13px]">设置</span>
+        <div class="home-nav-divider pt-4 mt-2 border-t border-white/5">
+          <a href="#" class="home-nav-link flex items-center gap-3 px-4 py-3 rounded-xl text-gray-400 hover:text-white hover:bg-white/5 transition">
+            <i class="home-nav-icon ph ph-gear text-lg"></i>
+            <span class="home-nav-label text-[13px]">设置</span>
           </a>
         </div>
       </nav>
@@ -176,8 +237,8 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
       <div class="mt-auto pt-4">
         <div class="bg-white/[0.03] border border-white/[0.05] rounded-xl p-3 mb-4">
           <div class="flex items-center gap-3 mb-4">
-            <div class="w-10 h-10 rounded-full overflow-hidden border border-purple-500/30 shrink-0 bg-gradient-to-br from-pink-400 to-rose-400 flex items-center justify-center text-sm font-bold text-white">
-              爱
+            <div class="w-10 h-10 rounded-full overflow-hidden border border-purple-500/30 shrink-0">
+              <img src="https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=100&q=80" alt="avatar" class="w-full h-full object-cover">
             </div>
             <div class="overflow-hidden">
               <div class="flex items-center gap-2">
@@ -199,19 +260,28 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
           </div>
 
           <div class="flex justify-between items-center px-1 text-gray-400">
-            <button class="hover:text-white transition"><i class="ph ph-bell text-[16px]"></i></button>
-            <button class="hover:text-white transition"><i class="ph ph-chat-circle text-[16px]"></i></button>
-            <button class="hover:text-white transition"><i class="ph ph-heart text-[16px]"></i></button>
-            <button class="hover:text-white transition"><i class="ph ph-gear text-[16px]"></i></button>
+            <button class="hover:text-white transition" aria-label="查看通知"><i class="ph ph-bell text-[16px]"></i></button>
+            <button class="hover:text-white transition" aria-label="打开留言"><i class="ph ph-chat-circle text-[16px]"></i></button>
+            <button class="hover:text-white transition" aria-label="查看收藏"><i class="ph ph-heart text-[16px]"></i></button>
+            <button class="hover:text-white transition" aria-label="打开设置"><i class="ph ph-gear text-[16px]"></i></button>
           </div>
         </div>
+
+        <button
+          class="sidebar-collapse-button w-full flex justify-center text-gray-600 hover:text-white transition py-2"
+          :aria-label="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+          :title="isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+          @click="toggleSidebar"
+        >
+          <i class="ph ph-caret-double-left text-sm" :class="{ 'rotate-180': isSidebarCollapsed }"></i>
+        </button>
       </div>
     </aside>
 
     <!-- ====== 右侧主内容区 ====== -->
-    <main class="flex-1 flex flex-col relative h-full overflow-y-auto px-8 py-7">
+    <main class="home-main scroll-area flex-1 flex flex-col relative h-full overflow-y-auto px-8 py-7">
       <!-- 顶部 Header -->
-      <header class="flex justify-between items-end mb-6 shrink-0">
+      <header class="home-header flex justify-between items-end mb-6 shrink-0">
         <div>
           <h2 class="text-[22px] font-bold flex items-center gap-2 text-gray-100 glow-text mb-1.5">
             欢迎回来，星海与你 <i class="ph-fill ph-sparkle text-purple-400 text-lg"></i>
@@ -224,19 +294,19 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
             <input type="text" placeholder="搜索城市、回忆、人物..." class="bg-[#1a1c2d]/60 border border-white/10 rounded-lg py-2 pl-9 pr-12 text-[12px] w-[260px] text-gray-300 focus:outline-none focus:border-purple-500/50 focus:bg-[#1a1c2d] transition backdrop-blur-md placeholder-gray-500">
             <div class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 bg-white/5 border border-white/10 px-1.5 py-0.5 rounded">⌘ K</div>
           </div>
-          <button class="w-9 h-9 rounded-lg bg-[#1a1c2d]/60 border border-white/10 flex items-center justify-center hover:bg-white/10 transition text-gray-300">
+          <button class="w-9 h-9 rounded-lg bg-[#1a1c2d]/60 border border-white/10 flex items-center justify-center hover:bg-white/10 transition text-gray-300" aria-label="查看通知">
             <i class="ph ph-bell text-[16px]"></i>
           </button>
-          <button class="w-9 h-9 rounded-lg bg-[#1a1c2d]/60 border border-white/10 flex items-center justify-center hover:bg-white/10 transition text-gray-300">
+          <button class="w-9 h-9 rounded-lg bg-[#1a1c2d]/60 border border-white/10 flex items-center justify-center hover:bg-white/10 transition text-gray-300" aria-label="打开素材包">
             <i class="ph ph-bag text-[16px]"></i>
           </button>
         </div>
       </header>
 
       <!-- 核心三列内容 -->
-      <div class="flex gap-6 mb-6 flex-1 min-h-[440px]">
+      <div class="home-content flex gap-6 mb-6 flex-1 min-h-[440px]">
         <!-- 左侧列 (4个数据卡片) -->
-        <div class="w-[240px] flex flex-col gap-4 shrink-0">
+        <div class="home-left-column w-[240px] flex flex-col gap-4 shrink-0">
           <!-- 卡片1: 最新回忆 -->
           <div class="glass-panel p-4 flex-1">
             <h3 class="text-[12px] text-gray-400 mb-3">最新回忆</h3>
@@ -305,25 +375,17 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
         </div>
 
         <!-- 中央 Cesium 地球区 -->
-        <div class="flex-1 relative flex flex-col items-center justify-center min-w-[400px]">
+        <div class="home-globe-column flex-1 relative flex flex-col items-center justify-center min-w-[400px]">
           <div class="globe-wrapper">
-            <!-- Cesium 容器 (裁剪为圆形) -->
-            <div ref="cesiumContainer" class="absolute inset-0 rounded-full overflow-hidden" />
-
-            <!-- SVG 航线装饰 (叠加在地球上) -->
-            <svg class="absolute inset-0 w-full h-full" style="z-index: 10; pointer-events: none;">
-              <path d="M180 200 Q 250 120 330 160" class="route-line" />
-              <path d="M180 200 Q 300 280 400 180" class="route-line" />
-              <path d="M220 350 Q 320 400 380 340" class="route-line" />
-              <path d="M180 200 Q 150 280 220 350" class="route-line" />
-            </svg>
+            <!-- Cesium 背景场景 -->
+            <div ref="cesiumContainer" class="cesium-circle" />
 
             <!-- 城市标记 (HTML overlay) -->
             <template v-if="showOverlay && isReady">
               <button
                 v-for="item in cityScreenPositions"
                 :key="item.city.id"
-                class="absolute z-20 cursor-pointer group"
+                class="globe-marker absolute z-20 cursor-pointer group"
                 :style="{
                   left: (item.x / (cesiumContainer?.clientWidth || 1)) * 100 + '%',
                   top: (item.y / (cesiumContainer?.clientHeight || 1)) * 100 + '%',
@@ -340,17 +402,22 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
           </div>
 
           <!-- 底部控制器 -->
-          <div class="absolute bottom-2 glass-panel px-5 py-2.5 rounded-full border border-white/10 flex items-center gap-5 text-[11px] text-gray-400 z-20 backdrop-blur-xl">
-            <label class="flex items-center gap-2 cursor-pointer text-gray-300">
+          <div class="globe-controls absolute bottom-2 glass-panel px-5 py-2.5 rounded-full border border-white/10 flex items-center gap-5 text-[11px] text-gray-400 z-20 backdrop-blur-xl">
+            <button
+              class="globe-control-toggle flex items-center gap-2 cursor-pointer text-gray-300"
+              type="button"
+              :aria-pressed="isAutoRotating"
+              @click="isAutoRotating = !isAutoRotating"
+            >
               <i class="ph ph-globe"></i> 自动旋转
-              <div class="relative w-7 h-4 bg-purple-600 rounded-full ml-1">
-                <div class="absolute right-0.5 top-0.5 w-3 h-3 bg-white rounded-full"></div>
-              </div>
-            </label>
+              <span class="relative w-7 h-4 rounded-full ml-1 transition" :class="isAutoRotating ? 'bg-purple-600' : 'bg-white/10'">
+                <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all" :class="isAutoRotating ? 'right-0.5' : 'left-0.5'"></span>
+              </span>
+            </button>
             <div class="w-px h-3 bg-white/10"></div>
-            <button class="flex items-center gap-1.5 hover:text-white transition"><i class="ph ph-plus-circle text-sm"></i> 放大</button>
-            <button class="flex items-center gap-1.5 hover:text-white transition"><i class="ph ph-minus-circle text-sm"></i> 缩小</button>
-            <button class="flex items-center gap-1.5 hover:text-white transition"><i class="ph ph-arrows-clockwise text-sm"></i> 重置视角</button>
+            <button class="globe-control-button flex items-center gap-1.5 hover:text-white transition" type="button" @click="zoomIn"><i class="ph ph-plus-circle text-sm"></i> 放大</button>
+            <button class="globe-control-button flex items-center gap-1.5 hover:text-white transition" type="button" @click="zoomOut"><i class="ph ph-minus-circle text-sm"></i> 缩小</button>
+            <button class="globe-control-button flex items-center gap-1.5 hover:text-white transition" type="button" @click="handleResetView"><i class="ph ph-arrows-clockwise text-sm"></i> 重置视角</button>
           </div>
 
           <!-- 飞行指示器 -->
@@ -366,10 +433,11 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
         </div>
 
         <!-- 右侧列 (4个数据卡片) -->
-        <div class="w-[280px] flex flex-col gap-4 shrink-0">
+        <div class="home-right-column w-[280px] flex flex-col gap-4 shrink-0">
           <!-- 卡片1: 纪念日倒计时 -->
           <div class="glass-panel p-4 h-[120px] relative overflow-hidden flex flex-col justify-between group">
-            <div class="absolute inset-0 opacity-10 bg-gradient-to-br from-purple-900 to-transparent"></div>
+            <div class="absolute inset-0 opacity-30 bg-cover bg-center" style="background-image: url('https://images.unsplash.com/photo-1531366936337-77cf3e615f87?auto=format&fit=crop&w=400&q=80')"></div>
+            <div class="absolute inset-0 bg-gradient-to-r from-[#0a0b14] to-transparent"></div>
             <div class="relative z-10 flex justify-between items-center w-full">
               <h3 class="text-[12px] text-gray-300">纪念日倒计时</h3>
               <span
@@ -388,6 +456,7 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
             <div v-else class="relative z-10 text-[12px] text-gray-500">暂无即将到来的纪念日</div>
             <div class="absolute bottom-4 right-4 z-10 text-5xl text-purple-400/50 drop-shadow-[0_0_15px_#a855f7] transform group-hover:scale-110 transition duration-500">
               <i class="ph-fill ph-heart"></i>
+              <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-4 border-2 border-purple-300/30 rounded-[50%] transform -rotate-12"></div>
             </div>
           </div>
 
@@ -397,15 +466,14 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
               <h3 class="text-[12px] text-gray-300">最近回忆</h3>
               <span class="text-[10px] text-gray-500 flex items-center cursor-pointer hover:text-gray-300">查看全部 <i class="ph ph-caret-right ml-0.5"></i></span>
             </div>
-            <div v-if="recentMemories.length" class="space-y-2">
+            <div v-if="recentMemories.length">
+              <!-- 主回忆条目 -->
               <div
-                v-for="mem in recentMemories.slice(0, 1)"
-                :key="mem.id"
-                class="flex gap-3 cursor-pointer group"
-                @click="router.push(`/memories/${mem.id}`)"
+                class="flex gap-3 mb-2 cursor-pointer group"
+                @click="router.push(`/memories/${recentMemories[0].id}`)"
               >
                 <div class="relative w-[130px] h-[75px] rounded-lg overflow-hidden border border-white/5 shrink-0 bg-gray-800">
-                  <img v-if="mem.coverImage" :src="mem.coverImage" class="w-full h-full object-cover transition duration-700 group-hover:scale-110">
+                  <img v-if="recentMemories[0].coverImage" :src="recentMemories[0].coverImage" :alt="recentMemories[0].title" class="w-full h-full object-cover transition duration-700 group-hover:scale-110">
                   <div class="absolute inset-0 bg-black/20 flex items-center justify-center">
                     <div class="w-7 h-7 rounded-full bg-white/20 backdrop-blur border border-white/30 flex items-center justify-center">
                       <i class="ph-fill ph-play text-white text-[12px] ml-0.5"></i>
@@ -413,9 +481,23 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
                   </div>
                 </div>
                 <div>
-                  <h4 class="text-[12px] text-gray-200 font-medium leading-snug">{{ mem.title }}</h4>
-                  <p class="text-[10px] text-gray-500 mt-1">{{ mem.cityName }}</p>
-                  <span class="inline-block mt-1 bg-pink-500/10 border border-pink-500/20 text-pink-400 text-[9px] px-1.5 py-0.5 rounded">回忆</span>
+                  <h4 class="text-[12px] text-gray-200 font-medium leading-snug">{{ recentMemories[0].title }}</h4>
+                  <p class="text-[10px] text-gray-500 mt-1">{{ recentMemories[0].updatedAt?.slice(0, 10) }} · {{ recentMemories[0].cityName }}</p>
+                  <span class="inline-block mt-1 bg-pink-500/10 border border-pink-500/20 text-pink-400 text-[9px] px-1.5 py-0.5 rounded">视频</span>
+                </div>
+              </div>
+              <!-- 缩略图行 -->
+              <div class="flex gap-2">
+                <div
+                  v-for="mem in recentMemories.slice(1, 4)"
+                  :key="mem.id"
+                  class="flex-1 h-10 rounded border border-white/5 overflow-hidden cursor-pointer"
+                  @click="router.push(`/memories/${mem.id}`)"
+                >
+                  <img v-if="mem.coverImage" :src="mem.coverImage" :alt="mem.title" class="w-full h-full object-cover opacity-80 hover:opacity-100 transition">
+                </div>
+                <div v-if="memoryCount > 4" class="flex-1 h-10 rounded border border-white/5 overflow-hidden relative bg-gray-800">
+                  <div class="absolute inset-0 flex items-center justify-center text-[10px] text-white">+{{ memoryCount - 4 }}</div>
                 </div>
               </div>
             </div>
@@ -429,6 +511,7 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
             <p class="text-[10px] text-gray-500 mt-1">— Love Atlas</p>
             <div class="absolute right-2 bottom-0 text-4xl text-blue-400/20 drop-shadow-[0_0_10px_#3b82f6]">
               <i class="ph-fill ph-heart"></i>
+              <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-3 border border-blue-300/30 rounded-[50%] transform rotate-12"></div>
             </div>
           </div>
 
@@ -440,6 +523,13 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
                 class="text-[10px] text-gray-500 flex items-center cursor-pointer hover:text-gray-300"
                 @click="router.push('/cities')"
               >查看全部城市 <i class="ph ph-caret-right ml-0.5"></i></span>
+            </div>
+            <!-- 点阵地图背景 -->
+            <div class="absolute left-0 right-16 top-10 bottom-0 opacity-20 pointer-events-none">
+              <div class="w-full h-full" style="background-image: url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPgo8cmVjdCB3aWR0aD0iNCIgaGVpZ2h0PSI0IiBmaWxsPSJub25lIj48L3JlY3Q+CjxjaXJjbGUgY3g9IjEiIGN5PSIxIiByPSIxIiBmaWxsPSIjZmZmIj48L2NpcmNsZT4KPC9zdmc+'); opacity: 0.4;"></div>
+              <div class="absolute top-[30%] left-[40%] w-1.5 h-1.5 bg-purple-500 rounded-full" style="box-shadow: 0 0 10px #a855f7;"></div>
+              <div class="absolute top-[40%] left-[70%] w-1.5 h-1.5 bg-pink-500 rounded-full" style="box-shadow: 0 0 10px #ec4899;"></div>
+              <div class="absolute top-[20%] left-[60%] w-1.5 h-1.5 bg-blue-500 rounded-full" style="box-shadow: 0 0 10px #3b82f6;"></div>
             </div>
             <div class="flex-1 flex flex-col justify-end relative z-10 ml-auto w-[100px] space-y-2">
               <div
@@ -462,7 +552,7 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
       </div>
 
       <!-- 底部4个功能卡片区 -->
-      <div class="grid grid-cols-4 gap-6 shrink-0 h-[110px]">
+      <div class="home-action-grid grid grid-cols-4 gap-6 shrink-0 h-[110px]">
         <!-- 快速记录 -->
         <div class="glass-panel card-gradient-1 p-4 relative overflow-hidden group border border-[#4c1d95]/30 flex flex-col justify-between hover:border-[#6d28d9] transition cursor-pointer">
           <div class="flex justify-between items-start z-10">
@@ -490,6 +580,7 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
             <button class="bg-[#6b21a8]/40 hover:bg-[#7e22ce]/60 border border-[#a855f7]/30 text-white text-[10px] px-3 py-1.5 rounded-md transition">进入探索</button>
           </div>
           <i class="ph-fill ph-buildings absolute -right-2 -bottom-2 text-6xl text-[#c084fc]/20 transform group-hover:scale-110 transition duration-500"></i>
+          <div class="card-bg-city"></div>
         </div>
 
         <!-- 相册素材库 -->
@@ -503,6 +594,7 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
             <button class="bg-[#1e40af]/40 hover:bg-[#1d4ed8]/60 border border-[#3b82f6]/30 text-white text-[10px] px-3 py-1.5 rounded-md transition">浏览素材</button>
           </div>
           <i class="ph-fill ph-images-square absolute -right-2 -bottom-2 text-6xl text-[#60a5fa]/20 transform group-hover:scale-110 transition duration-500"></i>
+          <div class="card-bg-album"></div>
         </div>
 
         <!-- 纪念日中心 -->
@@ -540,9 +632,210 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
 </template>
 
 <style scoped>
+/* ====== 页面级全局重置 ====== */
+:host {
+  display: block;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 隐藏滚动条但保留滚动能力 */
+.scroll-area::-webkit-scrollbar { width: 0; height: 0; }
+.scroll-area { scrollbar-width: none; -ms-overflow-style: none; }
+
+/* ====== 过渡动画 ====== */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.5s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
+/* ====== 参考 index.html 的侧栏精确样式 ====== */
+.home-shell {
+  position: relative;
+}
+
+.home-sidebar {
+  width: 240px;
+  min-width: 240px;
+  max-width: 240px;
+  padding: 32px 16px 16px;
+  background: rgba(12, 13, 22, 0.9);
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  transition: width 220ms ease, min-width 220ms ease, max-width 220ms ease, padding 220ms ease;
+  position: relative;
+  z-index: 4;
+}
+
+.home-logo {
+  height: 40px;
+  margin-bottom: 40px;
+  gap: 12px;
+}
+
+.home-nav {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.home-nav-link {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  color: rgb(156 163 175);
+  text-decoration: none;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.home-nav-link:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}
+
+.home-nav-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  font-size: 18px;
+  line-height: 18px;
+}
+
+.home-nav-label {
+  display: block;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.home-nav-divider {
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-collapse-button i {
+  transition: transform 180ms ease;
+}
+
+.home-shell.is-sidebar-collapsed .home-sidebar {
+  width: 72px;
+  min-width: 72px;
+  max-width: 72px;
+  padding: 32px 12px 16px;
+}
+
+.home-shell.is-sidebar-collapsed .home-logo {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.home-shell.is-sidebar-collapsed .home-logo > div:last-child,
+.home-shell.is-sidebar-collapsed .home-nav-label,
+.home-shell.is-sidebar-collapsed .home-sidebar .mt-auto > .bg-white\/\[0\.03\] {
+  display: none;
+}
+
+.home-shell.is-sidebar-collapsed .home-nav-link {
+  justify-content: center;
+  padding: 12px;
+}
+
+.home-shell.is-sidebar-collapsed .home-nav-icon {
+  margin: 0;
+}
+
+.home-shell.is-sidebar-collapsed .home-nav-divider {
+  padding-top: 16px;
+}
+
+.home-shell.is-sidebar-collapsed .sidebar-collapse-button {
+  padding-top: 12px;
+}
+
+/* ====== 参考 index.html 的主内容尺寸 ====== */
+.home-main {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  padding: 28px 32px;
+  pointer-events: none;
+}
+
+.home-header {
+  position: relative;
+  z-index: 3;
+  margin-bottom: 24px;
+  pointer-events: auto;
+}
+
+.home-content {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 440px;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.home-left-column {
+  width: 240px;
+  min-width: 240px;
+  max-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+}
+
+.home-right-column {
+  width: 280px;
+  min-width: 280px;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+}
+
+.home-left-column > .glass-panel,
+.home-right-column > .glass-panel,
+.home-action-grid > .glass-panel {
+  padding: 16px;
+}
+
+.home-action-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px;
+  height: 110px;
+  position: relative;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+.home-action-grid > .glass-panel {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.home-main > footer {
+  position: relative;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+/* ====== 心跳动画 ====== */
 .heartbeat {
   animation: heartbeat 1.5s ease-in-out infinite;
 }
@@ -553,9 +846,192 @@ const colorMap = ['#a855f7', '#ec4899', '#3b82f6', '#eab308', '#14b8a6']
   45% { transform: scale(1.1); }
 }
 
+/* ====== 地球区域 ====== */
+.home-globe-column {
+  pointer-events: none;
+  z-index: 0;
+}
+
+.globe-wrapper {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 240px;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+  z-index: 0;
+  pointer-events: auto;
+}
+
+.home-shell.is-sidebar-collapsed .globe-wrapper {
+  left: 72px;
+}
+
+/* Cesium 背景场景 */
+.cesium-circle {
+  position: relative;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  overflow: hidden;
+  background: #02030a;
+  filter: saturate(0.78) contrast(0.92) brightness(0.72);
+  pointer-events: auto;
+}
+
+/* 地图发光坐标点 */
+.globe-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  background: #ff71a3;
+  border-radius: 50%;
+  box-shadow: 0 0 12px 3px rgba(255, 113, 163, 0.48);
+}
+
+.globe-marker {
+  pointer-events: auto;
+}
+.globe-dot::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 1px solid rgba(255, 113, 163, 0.8);
+  border-radius: 50%;
+  animation: globe-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@keyframes globe-ping {
+  0% { transform: scale(1); opacity: 0.8; }
+  75% { transform: scale(2); opacity: 0; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+/* ====== 侧边栏导航激活态 ====== */
+.nav-active {
+  background: linear-gradient(90deg, rgba(157, 78, 221, 0.25) 0%, rgba(157, 78, 221, 0) 100%);
+  position: relative;
+}
+.nav-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10%;
+  height: 80%;
+  width: 3px;
+  background: #c084fc;
+  border-radius: 0 4px 4px 0;
+  box-shadow: 0 0 10px #c084fc;
+}
+
+/* ====== 毛玻璃面板 ====== */
+.glass-panel {
+  background: rgba(22, 24, 43, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+}
+
+/* ====== 发光文字 ====== */
+.glow-text { text-shadow: 0 0 10px rgba(255, 255, 255, 0.5); }
+.glow-purple { box-shadow: 0 0 20px rgba(157, 78, 221, 0.3); }
+
+/* ====== 进度条 ====== */
+.progress-bar {
+  height: 4px;
+  background: #1f2937;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #a855f7);
+  border-radius: 9999px;
+  box-shadow: 0 0 8px #a855f7;
+}
+
+/* ====== 底部卡片渐变 ====== */
+.card-gradient-1 { background: linear-gradient(135deg, rgba(30, 27, 75, 0.8) 0%, rgba(17, 24, 39, 0.8) 100%); }
+.card-gradient-2 { background: linear-gradient(135deg, rgba(49, 14, 104, 0.5) 0%, rgba(17, 24, 39, 0.8) 100%); }
+.card-gradient-3 { background: linear-gradient(135deg, rgba(30, 58, 138, 0.4) 0%, rgba(17, 24, 39, 0.8) 100%); }
+.card-gradient-4 { background: linear-gradient(135deg, rgba(131, 24, 67, 0.4) 0%, rgba(17, 24, 39, 0.8) 100%); }
+
+/* ====== 底部卡片装饰背景 ====== */
+.card-bg-city {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 96px;
+  height: 64px;
+  background-image: url('https://images.unsplash.com/photo-1514565131-fce0801e5785?auto=format&fit=crop&w=100&q=80');
+  background-size: cover;
+  opacity: 0.2;
+  mix-blend-mode: overlay;
+}
+.card-bg-album {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 96px;
+  height: 64px;
+  background-image: url('https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?auto=format&fit=crop&w=100&q=80');
+  background-size: cover;
+  opacity: 0.2;
+  mix-blend-mode: overlay;
+}
+
+/* ====== Cesium 容器样式 ====== */
+.cesium-circle :deep(.cesium-viewer),
+.cesium-circle :deep(.cesium-widget),
+.cesium-circle :deep(.cesium-viewer-cesiumWidgetContainer) {
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+}
+.cesium-circle :deep(.cesium-widget canvas) {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 0;
+}
 /* Hide Cesium default credits */
-.globe-wrapper :deep(.cesium-viewer-bottom),
-.globe-wrapper :deep(.cesium-widget-credits) {
+.cesium-circle :deep(.cesium-viewer-bottom),
+.cesium-circle :deep(.cesium-widget-credits),
+.cesium-circle :deep(.cesium-credit-textContainer),
+.cesium-circle :deep(.cesium-credit-logoContainer),
+.cesium-circle :deep(.cesium-credit-expand-link),
+.cesium-circle :deep(.cesium-credit-lightbox),
+.cesium-circle :deep(.cesium-credit-lightbox-overlay),
+.cesium-circle :deep(.cesium-credit-lightboxOverlay) {
   display: none !important;
 }
+
+.globe-controls {
+  pointer-events: auto;
+  bottom: 4px;
+  background: rgba(22, 24, 43, 0.48);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22), 0 0 26px rgba(59, 130, 246, 0.08);
+}
+
+.globe-control-toggle,
+.globe-control-button {
+  min-height: 24px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.globe-control-toggle:hover,
+.globe-control-button:hover {
+  color: #fff;
+}
+
 </style>
